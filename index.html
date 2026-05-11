@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Neural Network Matrix Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/cazala/mnist/dist/mnist.min.js"></script>
+    <script src="main.js" defer></script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <h1>ML 2026-1</h1>
+    <div class="container">
+      <div class="column">
+        <div>
+          <canvas id="draw-canvas" width="280" height="280"></canvas>
+          <br />
+          <div class="btn-container center">
+            <button onclick="clearCanvas()">Clear</button>
+            <button onclick="predictDigit()">Guess!</button>
+          </div>
+          <h2 id="prediction-text">Guess: -</h2>
+        </div>
+
+        <div class="center">
+          <p>Training Sample Preview:</p>
+          <canvas id="sample-canvas" width="28" height="28"></canvas>
+        </div>
+      </div>
+
+      <div>
+        <canvas id="nn-canvas" width="650" height="650"></canvas>
+      </div>
+    </div>
+
+    <div class="center">
+      <button id="train-btn" onclick="trainOnMNIST()">Train on 500 Random Digits</button>
+      <p id="train-status">Status: Model is untrained (random weights)</p>
+    </div>
+  </body>
+</html>
