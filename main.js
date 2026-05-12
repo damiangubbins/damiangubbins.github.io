@@ -28,6 +28,8 @@ drawCanvas.onmousemove = (e) => {
 function clearCanvas() {
   dctx.fillRect(0, 0, 280, 280);
   dctx.beginPath();
+  window.predicting = false;
+  drawNN();
 }
 
 const model = tf.sequential();
@@ -38,7 +40,7 @@ model.compile({ optimizer: "adam", loss: "categoricalCrossentropy" });
 const nnCanvas = document.getElementById("nn-canvas");
 const nctx = nnCanvas.getContext("2d");
 
-function get49BlockData(inputData) {
+function get49BlockData() {
   const blocks = [];
   const representativeIndices = [];
 
@@ -47,7 +49,7 @@ function get49BlockData(inputData) {
       let sum = 0;
       for (let y = r * 4; y < (r + 1) * 4; y++) {
         for (let x = c * 4; x < (c + 1) * 4; x++) {
-          sum += inputData[y * 28 + x];
+          sum += window.lastInputData[y * 28 + x];
         }
       }
       blocks.push(sum / 16);
@@ -73,7 +75,9 @@ drawNodeColumn(leftX, countInput, "Pixels", "#666", gapInput);
 drawNodeColumn(midX, countHidden, "Hidden", "#333", gapHidden);
 drawNodeColumn(rightX, countOutput, "0-9", "#000", gapOutput);
 
-let hoveredOutputNode = null;
+window.hoveredOutputNode = null;
+window.hoveredHiddenNode = null;
+window.lockedOutputNode = null;
 let nnCanvasMoveTimeout = null;
 
 nnCanvas.onmousemove = (e) => {
@@ -82,103 +86,149 @@ nnCanvas.onmousemove = (e) => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
-  hoveredOutputNode = null;
+  window.hoveredOutputNode = window.lockedOutputNode; // Keep locked node highlighted
+  window.hoveredHiddenNode = null;
 
   for (let k = 0; k < 10; k++) {
     const nodeY = nnCanvas.height / 2 + (k - 10 / 2) * gapOutput + 10;
     const dist = Math.hypot(mx - (nnCanvas.width - 40), my - nodeY);
 
     if (dist < 15) {
-      hoveredOutputNode = k;
+      window.hoveredOutputNode = k;
+      break;
+    }
+  }
+
+  for (let k = 0; k < 32; k++) {
+    const nodeY = nnCanvas.height / 2 + (k - 32 / 2) * gapHidden + 10;
+    const dist = Math.hypot(mx - midX, my - nodeY);
+
+    if (dist < 12) {
+      window.hoveredHiddenNode = k;
       break;
     }
   }
 
   nnCanvasMoveTimeout = setTimeout(() => {
-    drawNN(window.lastInputData);
-    console.log("Redrawing NN with hoveredOutputNode:", hoveredOutputNode);
+    drawNN();
   }, 20); // 20ms debounce
 };
 
-function drawNN(inputData) {
+nnCanvas.onclick = () => {
+  if (window.lockedOutputNode === window.hoveredOutputNode && window.lockedOutputNode !== null) {
+    window.hoveredOutputNode = null;
+    window.lockedOutputNode = null;
+  } else {
+    window.lockedOutputNode = window.hoveredOutputNode;
+  }
+  drawNN();
+};
+
+function drawNN() {
   nctx.clearRect(0, 0, nnCanvas.width, nnCanvas.height);
 
-  const { blocks, representativeIndices } = get49BlockData(inputData);
+  const { blocks, representativeIndices } = get49BlockData();
 
   const weights0 = model.layers[0].getWeights()[0].dataSync();
   const weights1 = model.layers[1].getWeights()[0].dataSync();
 
-  let maxWeight0 = 0.01;
-  for (let i = 0; i < weights0.length; i++) {
-    const val = Math.abs(weights0[i]);
-    if (val > maxWeight0) maxWeight0 = val;
-  }
+  const w0p99 = percentile(weights0, 0.99);
+  const w1p99 = percentile(weights1, 0.99);
 
-  let maxWeight1 = 0.01;
-  for (let i = 0; i < weights1.length; i++) {
-    const val = Math.abs(weights1[i]);
-    if (val > maxWeight1) maxWeight1 = val;
-  }
+  const w0p75 = percentile(weights0, 0.75);
+  const w1p75 = percentile(weights1, 0.75);
 
   const currentPrediction = tf.tidy(() => {
-    const input = tf.tensor2d(inputData, [1, 784]);
+    const input = tf.tensor2d(window.lastInputData, [1, 784]);
     return model.predict(input).dataSync();
   });
 
   const activationValues = tf.tidy(() => {
-    const input = tf.tensor2d(inputData, [1, 784]);
+    const input = tf.tensor2d(window.lastInputData, [1, 784]);
     const hiddenLayer = model.layers[0].apply(input);
     const activations = hiddenLayer.dataSync();
     const maxActivation = Math.max(...activations);
     return activations.map((a) => a / maxActivation);
   });
 
+  const inputHighlights = [];
+  const hiddenHighlights = [];
+
   blocks.forEach((avg, i) => {
-    if (window.predicting && avg < 0.2) return;
+    if (avg < 0.1 && window.predicting) return;
 
     const startY = nnCanvas.height / 2 + (i - countInput / 2) * gapInput + 10;
     const pixelIdx = representativeIndices[i];
 
     for (let j = 0; j < countHidden; j++) {
-      if (hoveredOutputNode !== null) {
-        const outputWeight =
-          weights1[j * countOutput + hoveredOutputNode] * (window.predicting ? activationValues[j] : 1.0);
-        if (Math.abs(outputWeight) < (window.predicting ? 0.05 : 0.2)) continue;
-      }
-
       const endY = nnCanvas.height / 2 + (j - countHidden / 2) * gapHidden + 10;
       const weight = weights0[pixelIdx * countHidden + j];
-      drawLink(leftX, startY, midX, endY, weight, maxWeight0);
+
+      if (window.hoveredOutputNode !== null && Math.abs(weights1[j * countOutput + window.hoveredOutputNode]) < w1p75)
+        continue;
+
+      if (window.hoveredOutputNode !== null) hiddenHighlights.push(j);
+
+      if (window.hoveredHiddenNode !== null && j !== window.hoveredHiddenNode) continue;
+      if (window.hoveredHiddenNode !== null && Math.abs(weight) < w0p75) continue;
+
+      if (window.hoveredOutputNode !== null && !inputHighlights.includes(i)) inputHighlights.push(i);
+
+      drawLink(leftX, startY, midX, endY, weight, w0p99);
     }
   });
 
   activationValues.forEach((activation, i) => {
-    if (window.predicting && activation < 0.2) return;
-
     const startY = nnCanvas.height / 2 + (i - countHidden / 2) * gapHidden + 10;
 
+    if (window.hoveredHiddenNode !== null && i !== window.hoveredHiddenNode) return;
+
     for (let j = 0; j < countOutput; j++) {
-      if (hoveredOutputNode !== null && j !== hoveredOutputNode) continue;
+      if (window.hoveredOutputNode !== null && j !== window.hoveredOutputNode) continue;
 
       const endY = nnCanvas.height / 2 + (j - countOutput / 2) * gapOutput + 10;
       const weight = weights1[i * countOutput + j];
-      drawLink(midX, startY, rightX, endY, weight, maxWeight1);
+
+      if (window.hoveredOutputNode !== null && Math.abs(weight) < w1p75) continue;
+      if (window.hoveredHiddenNode !== null && Math.abs(weight) < w1p75) continue;
+
+      drawLink(midX, startY, rightX, endY, weight, w1p99);
     }
   });
 
-  if (window.batch === 49 && !window.predicting) {
-    drawNodeColumn(leftX, countInput, "Input", "#666", gapInput);
-    drawNodeColumn(midX, countHidden, "Hidden", "#333", gapHidden);
-    drawNodeColumn(rightX, countOutput, "Output", "#000", gapOutput, true);
+  if (!window.predicting) {
+    drawNodeColumn(leftX, countInput, "Input", "#666", gapInput, false, [], inputHighlights);
+    drawNodeColumn(midX, countHidden, "Hidden", "#333", gapHidden, false, [], hiddenHighlights);
+    drawNodeColumn(rightX, countOutput, "Output", "#000", gapOutput, true, [], []);
   } else {
-    drawNodeColumn(leftX, countInput, "Input", "#666", gapInput, false, blocks);
-    drawNodeColumn(midX, countHidden, "Hidden", "#333", gapHidden, false, activationValues);
-    drawNodeColumn(rightX, countOutput, "Output", "#000", gapOutput, true, currentPrediction);
+    drawNodeColumn(leftX, countInput, "Input", "#666", gapInput, false, blocks, inputHighlights);
+    drawNodeColumn(midX, countHidden, "Hidden", "#333", gapHidden, false, activationValues, hiddenHighlights);
+    drawNodeColumn(rightX, countOutput, "Output", "#000", gapOutput, true, currentPrediction, []);
   }
 }
 
+function percentile(arr, p) {
+  if (!model._cachedPercentiles) model._cachedPercentiles = {};
+
+  const cacheKey = arr.length + "-" + p;
+  if (model._cachedPercentiles[cacheKey] && window.useCachedPercentiles) return model._cachedPercentiles[cacheKey];
+
+  const sorted = Array.from(arr)
+    .map(Math.abs)
+    .sort((a, b) => a - b);
+
+  const idx = Math.floor(p * sorted.length);
+  const val = sorted[idx] || 0.01;
+  model._cachedPercentiles[cacheKey] = val;
+
+  return val;
+}
+
 function drawLink(x1, y1, x2, y2, weight, maxWeight) {
-  let alpha = Math.sqrt(Math.abs(weight) / maxWeight);
+  // let alpha = Math.sqrt(Math.abs(weight) / (maxWeight + 1e-6));
+  let alpha = Math.abs(weight) / (maxWeight + 1e-6);
+  if (alpha > 1.0) alpha = 1.0;
+  if (alpha < 0.08) return;
 
   nctx.beginPath();
   nctx.moveTo(x1, y1);
@@ -190,7 +240,7 @@ function drawLink(x1, y1, x2, y2, weight, maxWeight) {
   nctx.lineWidth = Math.pow(alpha, 4) * 3;
 
   if (alpha > 0.95) {
-    nctx.shadowBlur = 8;
+    nctx.shadowBlur = 4;
     nctx.shadowColor = weight > 0 ? "red" : "blue";
   } else {
     nctx.shadowBlur = 0;
@@ -200,26 +250,37 @@ function drawLink(x1, y1, x2, y2, weight, maxWeight) {
   nctx.shadowBlur = 0;
 }
 
-function drawNodeColumn(x, count, label, color, gap, showDigits = false, scores = []) {
-  nctx.fillStyle = color;
+function drawNodeColumn(x, count, label, color, gap, showDigits, scores = [], highlight = []) {
   nctx.font = "12px Arial";
   nctx.textAlign = "center";
-
-  nctx.fillText(label, x, 20);
 
   for (let i = 0; i < count; i++) {
     const y = nnCanvas.height / 2 + (i - count / 2) * gap + 10;
     const score = scores[i] || 0;
-    const size = 3 + score * 8;
 
+    let opacity = 1.0;
+    if (window.hoveredOutputNode !== null) {
+      if (showDigits) {
+        opacity = i === window.hoveredOutputNode ? 1.0 : 0.1;
+      } else {
+        opacity = highlight.includes(i) ? 1.0 : 0.1;
+      }
+    }
+
+    nctx.globalAlpha = opacity;
+    nctx.fillStyle = color;
+
+    const size = 3 + score * 8;
     nctx.beginPath();
     nctx.arc(x, y, size, 0, Math.PI * 2);
     nctx.fill();
 
     if (showDigits) {
+      nctx.globalAlpha = 1.0;
       nctx.fillText(i, x + 20, y + 5);
     }
   }
+  nctx.globalAlpha = 1.0;
 }
 
 async function trainOnMNIST() {
@@ -233,30 +294,34 @@ async function trainOnMNIST() {
   const trainXs = tf.tensor2d(set.map((item) => item.input));
   const trainYs = tf.tensor2d(set.map((item) => item.output));
 
-  window.predicting = false;
+  if (model._cachedPercentiles) model._cachedPercentiles = {};
 
   await model.fit(trainXs, trainYs, {
     epochs: 3,
     batchSize: 10,
     callbacks: {
       onBatchEnd: async (batch, logs) => {
-        window.batch = batch;
         const randomIdx = Math.floor(Math.random() * 100);
         const currentSample = set[randomIdx].input;
 
         window.lastInputData = currentSample;
+        window.predicting = true;
 
         drawSample(currentSample);
-        drawNN(currentSample);
+        drawNN();
 
         await tf.nextFrame();
       },
     },
   });
 
+  window.predicting = false;
+
   status.innerText = "Status: Training Complete! Now try drawing a digit.";
   btn.disabled = false;
   btn.innerText = "Train More (Add 500 more samples)";
+
+  drawNN();
 }
 
 function predictDigit() {
@@ -272,7 +337,7 @@ function predictDigit() {
 
   window.predicting = true;
   window.lastInputData = tensor.dataSync();
-  drawNN(window.lastInputData);
+  drawNN();
 }
 
 function drawSample(pixels) {
@@ -291,6 +356,7 @@ function drawSample(pixels) {
 
 window.lastInputData = new Array(784).fill(0);
 window.predicting = false;
+window.useCachedPercentiles = false;
 
 clearCanvas();
-drawNN(window.lastInputData);
+drawNN();
